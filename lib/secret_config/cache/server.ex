@@ -1,6 +1,7 @@
 defmodule SecretConfig.Cache.Server do
   use GenServer
   require Logger
+  require EEx
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, %{}, opts)
@@ -12,6 +13,7 @@ defmodule SecretConfig.Cache.Server do
     else
       GenServer.cast(SecretConfig.Cache.Server, {:refresh})
     end
+
     {:ok, opts}
   end
 
@@ -51,22 +53,39 @@ defmodule SecretConfig.Cache.Server do
 
   defp ssm_parameter_map(map, next_token, _first_run) do
     path = Application.get_env(:secret_config, :env) || "/"
-    ssm_params = ExAws.SSM.get_parameters_by_path(path, recursive: true, with_decryption: true, next_token: next_token) |> ExAws.request!()
+
+    ssm_params =
+      ExAws.SSM.get_parameters_by_path(path,
+        recursive: true,
+        with_decryption: true,
+        next_token: next_token
+      )
+      |> ExAws.request!()
+
     next_token = ssm_params["NextToken"]
 
-    map = Enum.reduce ssm_params["Parameters"], map, fn (m, acc) ->
-      Map.put(acc, m["Name"], m["Value"])
-    end
+    map =
+      Enum.reduce(ssm_params["Parameters"], map, fn m, acc ->
+        Map.put(acc, m["Name"], m["Value"])
+      end)
 
     ssm_parameter_map(map, next_token, false)
   end
 
   defp local_ssm_map(path) do
-    local_ssm = Application.get_env(:secret_config, :file)
+    local_ssm_file = Application.get_env(:secret_config, :file)
 
-    with {:ok, parameters} <- YamlElixir.read_from_file(local_ssm) do
-      key = String.split(path, "/", trim: true)
-      get_in(parameters, key)
-    end
+    parameters =
+      if String.ends_with?(local_ssm_file, ".eex") do
+        bindings = Application.get_env(:secret_config, :file_bindings) || []
+
+        EEx.eval_file(local_ssm_file, bindings)
+        |> YamlElixir.read_from_string!()
+      else
+        YamlElixir.read_from_file!(local_ssm_file)
+      end
+
+    key = String.split(path, "/", trim: true)
+    get_in(parameters, key)
   end
 end
